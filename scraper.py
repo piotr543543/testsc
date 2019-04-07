@@ -1,292 +1,148 @@
-# Blank Python
-
-from BeautifulSoup import BeautifulSoup
-from urllib2 import urlopen, Request
-from time import sleep
-import simplejson
+# Anna & Tom's Rightmove scraper
+from lxml import etree
+from lxml.etree import tostring
+from datetime import datetime
 import scraperwiki
+import StringIO
 
-"""This is the address of the advanced search"""
-site = "http://www.saa.gov.uk"
-search = site + "/search.php?SEARCHED=1&ST=advanced&SEARCH_TABLE=valuation_roll&TYPE_FLAG=C&x=11&y=6&AS_UARN=&DISPLAY_COUNT=100&POSTCODE="
+# Parameters for the scraper: stations, radius etc.
+stations = [ {'Nantwich':6473}, {'Chester':2024},
+{'Mumbles':68},{'Hartford':4295},
+{'Winsford':10172},{'Macclesfield':5930},
+{'Prestbury':7421},{'Holmes Chapel':4673},
+{'Sandbach':7946},{'Crewe':2423},
+{'Congleton':2288},{'Alsager':185},
+{'Nantwich':6473},{'Wrenbury':10331},
+{'Whitchurch (Salop)':10004},{'Kidsgrove':5114},
+{'Stoke-on-Trent':8771},{'Stone':8777},
+{'Ambergate':209},{'Willington':10112},
+{'Burton-on-Trent':1613},{'Stafford':8660},
+{'Rugeley Trent Valley':7856},{'Codsall':2231},
+{'Albrighton':125},{'Cosford':2357},
+{'Stroud':8858},{'Stonehouse':8795},
+{'Pershore':7184},{'Kingham':5156},
+{'Moreton-in-Marsh':6371}, {'Westbury':9920},
+{'Frome':3641}, {'Taunton':9056},
+{'Tiverton':9218}, {'Hamworthy':4211},
+{'Brockenhurst':1418}, {'Ashurst New Forest':389},
+{'Worcester': 10298}, {'Pershore': 7184},
+{'Hagley': 4109}, {'Evesham': 3323},
+{'Honeybourne': 4697}, {'Shipton': 8207},
+{'Ascott-under-Wychwood Station': 350}, {'Charlbury': 1952},
+{'Finstock': 3521},{'Combe': 2282},
+{'Bradford-on-avon': 1265}, {'Bedwyn': 788},
+{'Pewsey': 7211}, {'Westbury': 9920},
+{'Frome': 3641}, 
+{'Castle Cary': 1853},
+{'Tisbury': 9215}, {'Gillingham': 3755},
+{'Templecombe': 9080}, {'Salisbury': 7922},
+{'Warminster': 9620}, {'Dilton Marsh Rail': 2771},
+{'Avoncliff': 449}, {'Freshford': 3623},
+{'Melksham': 6140}, {'Yate': 10373},
+{'Cam & Dursley': 1691}, {'Kemble': 5009},
+{'Market Harborough': 6050}, {'Kettering': 5087},
+{'Corby': 15013}, {'Wellingborough': 9743},
+{'Banbury': 545}, {'Bicester North': 929},
+{'Princes Risborough': 7454}, {'Bicester Town': 932},
+{'Aylesbury': 458}, {'Amersham': 215},
+{'Long Buckby': 5816}, {'Theale': 9125},
+{'Aldermaston': 131}, {'Midgham': 6209},
+{'Thatcham': 9095}, {'Newbury': 6599},
+{'Kintbury': 5222}, {'Leamington Spa': 5444},
+{'Newbury Racecourse':  6596}, {'Newington': 6623}, 
+{'Hollingbourne': 4661}, {'Chilham': 2048}, 
+{'Wye': 10346}, {'Ham street': 4157}, 
+{'Appledore': 266}, {'Estchingham': 3305},
+{'Chippenham': 2069} ]
+MIN_PRICE = 200000
+MAX_PRICE = 310000
+MIN_BEDROOMS = 2
+RADIUS_MILES = 3.0
+stop_phrases = [ "views over the garden",
+"views over the rear garden", "views over the front garden",
+"views over rear garden", "views over front garden",
+"views across the gardens", "views onto the garden",
+"in need of updating", "in need of modernisation",
+"views over rear aspect", "views over front aspect",
+"views over the rear aspect", "views over the front aspect",
+"views over side aspect", "views over the side aspect",
+"1970s",  "bungalow", "bunaglow",
+"views to the front garden", "views to the rear garden" ]
+# "semi detached", "semi-detached", "semidetached",
+DOMAIN = 'http://www.rightmove.co.uk'
 
-# find the BoundaryLine geometry for Edinburgh
-# ( http://unlock.edina.ac.uk/ws/search?name=City%20of%20Edinburgh - Edinburgh is ID 13323656 )
-# find all the postcodes in Edinburgh's bounding box
-
-def find_postcodes():
-    postcode_search = "http://unlock.edina.ac.uk/ws/search?spatialMask=13323656&realSpatial=no&name=EH*&format=json&maxRows=200"
-    res = simplejson.loads(urlopen(postcode_search).read())
-    list_postcodes(res,0)
-
-def crosscheck_postcodes():
-    # we missed some, possibly due to a bug now fixed in Unlock search.
-    # however some 200+ really don't exist in CodePoint, the mystery of the Bad Postcodes
-    scraperwiki.sqlite.execute("delete from badpostcodes")
-    codes = scraperwiki.sqlite.select("distinct postcode from properties")
-    postcodes = list(p['postcode'] for p in codes)
-    for p in postcodes:
-         encoded = p.replace(' ','%20')
-         got = scraperwiki.sqlite.select("* from postcodes where postcode = '"+p+"'")
-         if got == []:
-#             print "missing"
-             try:
-             #    possjson = urlopen("http://unlock.edina.ac.uk/ws/search?format=json&name="+encoded).read()
-             #print possjson
-                 res = simplejson.loads(urlopen("http://unlock.edina.ac.uk/ws/search?format=json&name="+p).read())
-                 f = res['features'][0]
-                 lonlat = f['properties']['centroid']
-                 scraperwiki.sqlite.save(['postcode'],{'postcode':p,'lonlat':lonlat,'unlock_id':f['id']})
-                 
-#                 print res
-             except:
-#                 print "failed for "+p
-                 scraperwiki.sqlite.save(['postcode'], {'postcode':p} ,table_name='badpostcodes')
-
-def list_postcodes(res,startRow):
-
-    total = res['totalResults']
-
-    for f in res['features']:
-
-        p = f['properties']['name']
-        # Add a space - may be fragile. An issue for Unlock, postcodes should come out in their native forms
-        chars = list(p)
-        chars.insert(-3,' ')
-        postcode = ''.join(chars)
-
-        data = { 'postcode' : postcode, 'lonlat': f['properties']['centroid'],'unlock_id':f['id'] }
-
-        scraperwiki.sqlite.save(['postcode'], data, table_name="postcodes")
-
-    if startRow < total:
-         startRow = startRow + 200
-         try:
-             find_postcodes(simplejson.loads(urlopen(postcode_search+'&startRow='+str(startRow)).read()),startRow)
-         except:
-             pass
-
-
-def read_more(more):
-    # extra metadata. currently only saving the proprietor info.
-    soup = BeautifulSoup(urlopen(site+more).read())
-    row = soup.find('tr',{'class':'bgdarkgrey'})
-    data = {}
-    # err happened? but why?
-    try:
-        cols = row.findAll('td')
-        prop = cols[3]
-        proprietor = "\n".join(list(c for c in prop.contents if c.string is not None))
-        data['proprietor'] = proprietor
-    except: pass
-
-    return data 
-
-def extract_data(row):
-    # read the rows, look up links, save the data to the scraperwiki store
-    data = {}
-    cols = row.findAll('td')
-
-    labels = { 0: 'ref_no',1:'description',2:'address',3:'occupier',4:'rateable',5:'more' }
-
-    for n in labels.keys():
-        if labels[n] == 'more':
-            item = cols[n].find('a')['href']
-        elif labels[n] == 'rateable':
-            item = cols[n].contents[0]
-            item = item.replace('&pound;','')
-            item = item.replace(',','')
-        elif labels[n] == 'address':
-            item = "\n".join(list(c for c in cols[n].contents if c.string is not None))
-            data['postcode'] = cols[n].contents[-1]
-        elif cols[n].find('a') is not None:
-            item = cols[n].find('a').text
-        else: 
-            item = "\n".join(list(c for c in cols[n].contents if c.string is not None))
-        
-        try: item.replace('<br />',' ')
-        except: pass
-
-        data[labels[n]] = item
-
-    # commented out for now, as we want the core data 
-    # and this will bring Scraperwiki down every few 2 or 3K requests - and there may easily be 100K
-    #more = read_more(data['more'])
-    # gesture of politeness? will ScraperWiki be cautious + storage save lag compensate?
-    # sleep(1)
-
-    #for k in more.keys(): data[k] = more[k]
-    #data.pop('more')
-    # instead
-    data['proprietor'] = ''
-    #print data
-    scraperwiki.sqlite.save(['ref_no'], data,table_name='properties')
-
-    return data
-
-def read_page(raw):
-    # page through looking for rows of data 
-    soup = BeautifulSoup(raw)
-
-    soup.find('br').replaceWith(' ')
-    # fish out the table rows with light or dark grey CSS
-    rows = soup.findAll('tr',{'class':'bglightgrey'})
-    rows2 = soup.findAll('tr',{'class':'bgdarkgrey'})
-
-    for row in rows: extract_data(row)
-    for row in rows2: extract_data(row)
-
-    # If there are results there will be a page count which may be > 1
-    counter = soup.find('div',{'class':'pagecounter'})
-    try: 
-        pages = counter.findAll('li')
-        count = len(pages)
-        
-        if count > 1:
-            # follow the link after the current page
-            search = None
-            next = None
-            for p in pages:
-                a = p.find('a')
-                 
-                if next == 1:
-                    search = a['href']
-                    print search
-                    break
-
-                if a is None:
-                    next = 1 
-                
-            print site+search
-            read_page(urlopen(site+search).read())
-    except:
-        pass
-
-
-# uncomment this to reload the Edinburgh postcode open data from Unlock
-#find_postcodes()
-    
-# uncomment this to search ALL THE POSTCODES
-#codes = scraperwiki.sqlite.select("postcode from postcodes")
-#postcodes = list(p['postcode'] for p in codes)
-
-# uncomment this just to test
-# postcodes = ['EH9','EH27 8DF']
-#postcodes = ['EH27 8DF']
-
-# in an attempt to break through the rate limit to start with,
-# lets try by postcode outcode, it'll paginate may count as one search
-
-
-def search_request(postcode):
-    request = Request(search+postcode)
-    #print request.get_full_url()
-    request.add_header('User-agent', 'Mozilla/5.0 (Linux i686)')
-    return urlopen(request).read()
-    
-
-def postcode_outcodes():
-
-    nums = range(1,52) # there are up to 95 but
-    postcodes = list( 'EH'+str(n) for n in nums)
-    for p in postcodes:
-        raw = search_request(p)
-        soup = BeautifulSoup(raw)
-        if soup.find('p',{'id':'results'}) is not None:
-
-            incodes = list( p+'%20'+str(n) for n in range(1,9))
-            for i in incodes: 
-                print i
-                read_page(search_request(i))
-
+def scrape_individual_house(house_url, town):
+    HOUSE_URL = (DOMAIN + house_url).split('/svr/')[0]
+    #print 'Scraping %s' % HOUSE_URL
+    house_html = scraperwiki.scrape(HOUSE_URL)
+    house_parser = etree.HTMLParser()
+    house_tree = etree.parse(StringIO.StringIO(house_html), house_parser)
+    house_text = house_tree.xpath('string(//div[@class="propertyDetailDescription"])')
+    # Only look at houses with the word 'views' in the ad text. 
+    if 'views' in house_text.lower() or 'elevated position' in house_text.lower():
+        house = {}
+        stopped_phrase = None
+        # Check for stop phrases
+        for sp in stop_phrases:
+            if (sp in house_text.lower()):
+                #print 'Ignoring %s because of stop phrase: %s' % (HOUSE_URL, sp)
+                stopped_phrase = sp
+        #if not any(d.get('link') == HOUSE_URL for d in house_items):
+        title = house_tree.xpath('string(//h1[@id="propertytype"])')
+        image_url = tostring(house_tree.xpath('//img[@id="mainphoto"]')[0])
+        price = house_tree.xpath('string(//div[@id="amount"])')
+        nearby_stations = house_tree.xpath('string(//div[@id="nearbystations"]/div)')
+        ns = nearby_stations.split("(")
+        distance = ns[-1].replace(")","")
+        distance = ' '.join(distance.split()).strip()
+        if float(distance.replace(" miles",""))>1.5:
+            return False
+        map_img = house_tree.xpath('//a[@id="minimapwrapper"]/img')
+        if map_img:
+            map_img = tostring(house_tree.xpath('//a[@id="minimapwrapper"]/img')[0])
         else:
-            read_page(raw)
-            
-            
-#postcode_outcodes()    
-def type_rateables():
-    # if we force type to int we get integer column type?
-    properties = scraperwiki.sqlite.select("* from properties")
-    for p in properties:
-        p['rates'] = int(p['rateable'])
-        scraperwiki.sqlite.save(['ref_no'], p,table_name='properties')
+            map_img = ''
+        house['title'] = "%s - %s, %s, %s from station" % (title, town, price, distance)
+        #print 'HOUSE FOUND! %s, %s ' % (house['title'], HOUSE_URL)
+        item_text = '<a href="' + HOUSE_URL + '">' + image_url + '</a>'
+        #item_text += '<div style="position:relative;">'
+        item_text += '<a href="' + HOUSE_URL + '">' + map_img + '</a>'
+        #item_text += '<img id="googlemapicon" src="http://www.rightmove.co.uk/ps/images11074/maps/icons/rmpin.png"'
+        #item_text += ' style="position:absolute;top:100px;left:100px;alt="Property location" /></div>'
+        item_text += house_text
+        item_text = item_text.replace("views","<span style='font-weight:bold;color:red;'>views</span>")
+        house['description'] = item_text.replace("fireplace","<span style='font-weight:bold;color:red;'>fireplace</span>")
+        if stopped_phrase:
+            house['stop'] = stopped_phrase
+        else:
+            house['stop'] = ''
+        house['link'] = HOUSE_URL
+        house['pubDate'] = datetime.now()
+        scraperwiki.sqlite.save(['link'], house)
 
-def central_proprietors():
-    # look up ownership info on vacant properties of suitable rateable value in central-ish areas
-    # should have left out the commas for easy sort 
-    postcodes = (1,2,3,6,7,8,9,10,11,16)
-    for c in postcodes:
-        code = 'EH'+str(c)+' %'
-        print "* from properties where rates < 10000 and rates > 2000 and occupier = 'Vacant' and postcode like '"+code+"'"
-        properties = scraperwiki.sqlite.select("* from properties where rates < 10000 and rates > 2000 and occupier = 'Vacant' and postcode like '"+code+"'")
+# Gather list of results for an individual station. 
+def scrape_results_page(results_url, town, initial=False):
+    results_url = DOMAIN + results_url
+    html = scraperwiki.scrape(results_url)
+    parser = etree.HTMLParser()
+    tree = etree.parse(StringIO.StringIO(html), parser)
+    house_links = tree.xpath('//ol[@id="summaries"]//a[starts-with(text(), "More details")]/@href')
+    for house_link in house_links:
+        scrape_individual_house(house_link, town)
+    if initial:
+        results_links = tree.xpath('//ul[@class="items"]//a/@href')
+        for r in results_links:
+            scrape_results_page(r, town)
 
-        for p in properties:
-            print p['postcode']
-            print 'X'+p['proprietor']+'X'
-            if p['proprietor'] is None:
-                
-                data = read_more(p['more'])
-                p['proprietor'] = data['proprietor']
+scrape_individual_house('/property-for-sale/property-33036143.html/svr/3113','Castle Cary')
 
-                scraperwiki.sqlite.save(['ref_no'], p,table_name='properties')
-
-#type_rateables()
-#central_proprietors()
-
-def clean_postcodes():
-    codes = scraperwiki.sqlite.select("* from postcodes where postcode like '%  %'")
-    for p in codes:
-        p['postcode'] = p['postcode'].replace('  ',' ')
-        scraperwiki.sqlite.save(['postcode'], p, table_name="postcodes")
-        
-#clean_postcodes()
-
-def split_lonlats(p):
-    # yet again i was  trying to be too clever 
-    lon,lat = p['lonlat'].split(',')
-    p['lon'] = lon
-    p['lat'] = lat 
-    scraperwiki.sqlite.save(['ref_no'], p,table_name='properties')
-    pass 
-
-def append_lonlats():
-    # for easier import into other services that expect geodata
-    properties = scraperwiki.sqlite.select("* from properties where lonlat is null")
-    failed = 0
-    for p in properties:
-        s = "* from postcodes where postcode = '"+p['postcode']+"'"
-        #print s
-        ll = scraperwiki.sqlite.select(s)
-        try:
-            lonlat = ll[0]['lonlat']
-            p['lon'],p['lat'] = lonlat.split(',')
-            scraperwiki.sqlite.save(['ref_no'], p,table_name='properties')
-
-        except:
-            failed = failed + 1
-    print str(failed) + " postcodes failed"
-
-  
-
-def search_by_postcode():
-    for p in postcodes:
-
-    # don't duplicate requests
-        found = scraperwiki.sqlite.select("* from properties where postcode is ? limit 1",[p])
-        if len(found) != 0:
-           continue
-
-        p = p.replace(' ','%20')
-        print p
-        request = Request(search+p)
-        #print request.get_full_url()
-        request.add_header('User-agent', 'Mozilla/5.0 (Linux i686)')
-        raw=urlopen(request).read()
-        #print raw
-        read_page(raw)
-
-
-
-crosscheck_postcodes()
-
-append_lonlats()
+# Go through each station: scrape each set of results in turn. 
+for station in stations:
+    station_name = station.keys()[0].title()
+    print 'Scraping %s' % station_name
+    station_id = station.values()[0]
+    url1 = '/property-for-sale/find.html?locationIdentifier=STATION^%s&minPrice=%s&maxPrice=%s' % (station_id, MIN_PRICE, MAX_PRICE)
+    url2 = '&minBedrooms=%s&displayPropertyType=houses&oldDisplayPropertyType=houses&radius=%s' % (MIN_BEDROOMS, RADIUS_MILES)
+    # displayPropertyType=detachedshouses
+    INITIAL_URL = url1 + url2
+    scrape_results_page(INITIAL_URL, town=station_name, initial=True)
